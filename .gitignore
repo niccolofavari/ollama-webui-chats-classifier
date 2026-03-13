@@ -1,0 +1,29 @@
+# Chat export (dati personali, file pesanti)
+chat-export-*.json
+
+# Output della pipeline (generati, non versionare)
+output/
+
+# Checkpoint intermedi
+checkpoints/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+*.egg-info/
+.venv/
+venv/
+
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# Editor
+.vscode/
+.idea/
+*.swp
+*.swo
