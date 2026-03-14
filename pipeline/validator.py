@@ -37,7 +37,65 @@ VALID_CONFIDENCE_VALUES = {"high", "medium", "low", "alta", "media", "bassa"}
 _SLUG_RE = re.compile(r"[^a-z0-9\-_]")
 
 
-# ── Helpers ──────────────────────────────────────────────────────────────────
+# ── Language normalization ────────────────────────────────────────────────────
+
+# Maps verbose/mixed language strings to a canonical short name.
+# The model often returns things like "italiano/inglese (con riferimenti a...)"
+_LANGUAGE_ALIASES: dict[str, str] = {
+    "italian": "italian",
+    "italiano": "italian",
+    "english": "english",
+    "inglese": "english",
+    "french": "french",
+    "francese": "french",
+    "spanish": "spanish",
+    "spagnolo": "spanish",
+    "portuguese": "portuguese",
+    "portoghese": "portuguese",
+    "german": "german",
+    "tedesco": "german",
+}
+
+
+def _normalize_language(raw: str) -> str:
+    """
+    Return a short canonical language name from a potentially verbose string.
+
+    Examples:
+        "italiano"                          → "italian"
+        "italiano/inglese"                  → "italian"   (first wins)
+        "inglese (con riferimenti a...)"    → "english"
+        "it"                               → "italian"
+        "en"                               → "english"
+        "klingon"                          → "klingon"    (unknown → lowercased as-is)
+    """
+    if not raw:
+        return FALLBACK_LANGUAGE
+
+    # ISO 639-1 two-letter codes
+    _ISO = {"it": "italian", "en": "english", "fr": "french", "es": "spanish",
+            "pt": "portuguese", "de": "german", "nl": "dutch", "ru": "russian",
+            "zh": "chinese", "ja": "japanese", "ar": "arabic"}
+
+    # Take only the first token before any separator ( / , ; ( space-then-paren )
+    first = re.split(r"[/,;(\s]", raw.strip())[0].strip().lower()
+
+    if first in _ISO:
+        return _ISO[first]
+    if first in _LANGUAGE_ALIASES:
+        return _LANGUAGE_ALIASES[first]
+
+    # Try the full string lowercased against aliases
+    lower = raw.lower()
+    for alias, canonical in _LANGUAGE_ALIASES.items():
+        if lower.startswith(alias):
+            return canonical
+
+    # Unknown language — return lowercased first token, short enough to be useful
+    return first[:30] if first else FALLBACK_LANGUAGE
+
+
+# ── Helpers ───────────────────────────────────────────────────────────────────
 
 def _coerce_str(value: Any, field: str, chat_id: str, fallback: str = "") -> str:
     """Return value as a non-empty stripped string, or fallback."""
@@ -156,12 +214,12 @@ def sanitize_extraction(raw: dict, chat_id: str = "", title: str = "") -> dict:
     )
     multi_topic = _coerce_bool(raw.get("multi_topic"), "multi_topic", label, fallback=False)
 
-    # language: normalize list → single string
+    # language: normalize list → single string, then extract the primary language
     lang_raw = raw.get("language", "")
     if isinstance(lang_raw, list):
         lang_raw = lang_raw[0] if lang_raw else ""
         log.warning("[%s] 'language' was a list, using first element: %r", label, lang_raw)
-    language = _coerce_str(lang_raw, "language", label, fallback=FALLBACK_LANGUAGE)
+    language = _normalize_language(_coerce_str(lang_raw, "language", label, fallback=FALLBACK_LANGUAGE))
 
     quality_note_raw = raw.get("quality_note")
     if quality_note_raw in (None, "null", "none", "None", ""):
