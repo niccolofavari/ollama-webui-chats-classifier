@@ -85,8 +85,11 @@ INTERACTION TYPES DETECTED:
 {int_str}"""
 
 
-def propose_taxonomy(context: str) -> dict:
-    """Ask the LLM to propose a taxonomy based on the corpus analysis."""
+def _call_taxonomy_part_a(context: str) -> dict:
+    """
+    Call A — generates macro_categories + taxonomy_notes.
+    Kept small enough for a 3b model to complete in one shot.
+    """
     prompt = f"""You are a digital librarian. Design a taxonomy to organize a personal
 archive of AI conversations.
 
@@ -94,18 +97,15 @@ Here is the corpus analysis:
 
 {context}
 
-GOAL: propose a taxonomy that:
-1. Emerges FROM THE DATA (do not invent categories absent from the corpus)
-2. Has 6-12 macro-categories (manageable mentally)
-3. Each macro-category has specific subcategories
-4. Includes a "Miscellaneous" macro-category for outliers
-5. Has a controlled tag vocabulary (30-60 tags, precise and non-redundant)
-6. Is balanced: no category should contain >40% of conversations
-7. Has CLEAR, unambiguous classification criteria
+GOAL: propose macro-categories that:
+1. Emerge FROM THE DATA (do not invent categories absent from the corpus)
+2. Number between 6 and 12 (manageable mentally)
+3. Include a "miscellaneous" category for outliers
+4. Are balanced: no category should contain >40% of conversations
+5. Have CLEAR, unambiguous classification criteria
 
-Return ONLY a JSON object:
+Return ONLY a JSON object (no markdown, no comments):
 {{
-  "taxonomy_notes": "notes on the corpus and choices made",
   "macro_categories": [
     {{
       "id": "slug-lowercase",
@@ -121,6 +121,33 @@ Return ONLY a JSON object:
       ]
     }}
   ],
+  "taxonomy_notes": "max 2 sentences: key observations about this corpus"
+}}"""
+
+    return llm_call_json(
+        prompt=prompt,
+        options={**LLM_OPTIONS_TAXONOMY, "num_predict": 4000},
+        required_fields=["macro_categories"],
+        timeout=300,
+    )
+
+
+def _call_taxonomy_part_b(context: str, categories_summary: str) -> dict:
+    """
+    Call B — generates controlled_tags + interaction_types + classification_rules.
+    Receives a compact summary of part A so it stays coherent.
+    """
+    prompt = f"""You are a digital librarian completing a taxonomy for a personal AI conversation archive.
+
+The macro-categories already decided are:
+{categories_summary}
+
+Based on the same corpus analysis:
+
+{context}
+
+Now produce ONLY the vocabulary and rules. Return a JSON object (no markdown):
+{{
   "controlled_tags": [
     {{
       "tag": "tag-slug",
@@ -139,14 +166,59 @@ Return ONLY a JSON object:
     "Rule 1: if the conversation covers X, put it in category Y",
     "Rule 2: when in doubt between A and B, choose based on..."
   ]
-}}"""
+}}
+
+Rules:
+- 20-40 tags total, precise and non-redundant
+- Only tag concepts actually present in the corpus
+- tag values: lowercase slugs with hyphens only (e.g. "web-dev", "machine-learning")"""
 
     return llm_call_json(
         prompt=prompt,
-        options=LLM_OPTIONS_TAXONOMY,
-        required_fields=["macro_categories", "controlled_tags"],
-        timeout=360,
+        options={**LLM_OPTIONS_TAXONOMY, "num_predict": 4000},
+        required_fields=["controlled_tags", "interaction_types"],
+        timeout=300,
     )
+
+
+def propose_taxonomy(context: str) -> dict:
+    """
+    Ask the LLM to propose a full taxonomy based on the corpus analysis.
+
+    Split into two calls to stay within the output token budget of small models:
+      Call A → macro_categories + taxonomy_notes
+      Call B → controlled_tags + interaction_types + classification_rules
+    The two results are merged into one taxonomy dict.
+    """
+    log.info("Taxonomy part A: generating macro-categories...")
+    print("  [A] Generating macro-categories...", end=" ", flush=True)
+    part_a = _call_taxonomy_part_a(context)
+    n_cats = len(part_a.get("macro_categories", []))
+    print(f"✓  {n_cats} categories")
+    log.info("Part A done: %d categories", n_cats)
+
+    # Build a compact summary of categories to give part B the context it needs
+    cats = part_a.get("macro_categories", [])
+    categories_summary = "\n".join(
+        f"  - {c['id']} ({c.get('name', '')}): {c.get('description', '')[:80]}"
+        for c in cats
+    )
+
+    log.info("Taxonomy part B: generating tags and rules...")
+    print("  [B] Generating tags and classification rules...", end=" ", flush=True)
+    part_b = _call_taxonomy_part_b(context, categories_summary)
+    n_tags = len(part_b.get("controlled_tags", []))
+    n_int = len(part_b.get("interaction_types", []))
+    print(f"✓  {n_tags} tags, {n_int} interaction types")
+    log.info("Part B done: %d tags, %d interaction types", n_tags, n_int)
+
+    return {
+        "taxonomy_notes":      part_a.get("taxonomy_notes", ""),
+        "macro_categories":    part_a.get("macro_categories", []),
+        "controlled_tags":     part_b.get("controlled_tags", []),
+        "interaction_types":   part_b.get("interaction_types", []),
+        "classification_rules": part_b.get("classification_rules", []),
+    }
 
 
 def generate_readable_taxonomy(taxonomy: dict) -> str:
@@ -243,12 +315,12 @@ def run() -> None:
     print("Building context from corpus analysis...")
     context = build_llm_context(analysis)
 
-    print("Asking LLM to propose a taxonomy...")
+    print("Asking LLM to propose a taxonomy (2 calls)...")
     taxonomy = propose_taxonomy(context)
 
     n_cats = len(taxonomy.get("macro_categories", []))
     n_tags = len(taxonomy.get("controlled_tags", []))
-    n_int = len(taxonomy.get("interaction_types", []))
+    n_int  = len(taxonomy.get("interaction_types", []))
     log.info("Taxonomy proposed: categories=%d  tags=%d  interaction_types=%d", n_cats, n_tags, n_int)
     print(f"  Macro-categories:  {n_cats}")
     print(f"  Controlled tags:   {n_tags}")
