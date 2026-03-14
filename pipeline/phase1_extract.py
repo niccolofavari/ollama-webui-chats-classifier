@@ -44,13 +44,78 @@ SYSTEM_PROMPT = """You are an archivist. Analyze the conversation and return ONL
 }"""
 
 
+def _display_title(title: str, max_len: int = 55) -> str:
+    """Return a single-line, printable version of the title for console output."""
+    first_line = title.split("\n")[0].strip()
+    if len(first_line) > max_len:
+        return first_line[:max_len - 1] + "…"
+    return first_line
+
+
+def _content_is_mostly_code(text: str, sample_chars: int = 2000) -> bool:
+    """
+    Heuristic: if the first sample is mostly HTML/code, return True.
+    Triggers a simplified prompt to avoid the LLM getting confused.
+    """
+    sample = text[:sample_chars]
+    html_markers = ("<!DOCTYPE", "<html", "<?php", "###", "class-", ".php", ".js", ".css")
+    hits = sum(1 for m in html_markers if m in sample)
+    return hits >= 2
+
+
+def _redact_code_blocks(text: str) -> str:
+    """
+    Replace code blocks and long PHP/HTML chunks with a short placeholder.
+    Keeps only the prose context around the code, which is all the LLM needs
+    to understand the conversation topic.
+    """
+    import re
+    # Markdown code fences: ```...```
+    text = re.sub(r"```[\s\S]*?```", "[CODE BLOCK OMITTED]", text)
+    # Inline PHP tags
+    text = re.sub(r"<\?php[\s\S]*?\?>", "[PHP BLOCK OMITTED]", text)
+    # Long HTML tags (>100 chars)
+    text = re.sub(r"<[^>]{100,}>", "[HTML TAG OMITTED]", text)
+    # Lines that look like pure code (start with $, //, namespace, class, function)
+    lines = text.split("\n")
+    result = []
+    code_run = 0
+    for line in lines:
+        stripped = line.strip()
+        is_code_line = (
+            stripped.startswith(("$", "//", "/*", "*", "namespace ", "class ", "function ", "<?", "?>", "};", "});"))
+            or (len(stripped) > 60 and stripped.count("{") + stripped.count("}") > 2)
+        )
+        if is_code_line:
+            code_run += 1
+            if code_run == 1:
+                result.append("[... code omitted ...]")
+        else:
+            code_run = 0
+            result.append(line)
+    return "\n".join(result)
+
+
 def extract_single(chat: dict) -> dict:
     """
     Run the LLM extraction for one conversation.
     Returns a sanitized dict — never raises on LLM or parsing errors.
     Raises RuntimeError if the LLM call itself fails after all retries.
+
+    For conversations whose content is mostly code/HTML, uses a simplified
+    prompt with a shorter input to avoid the model getting confused.
     """
-    text = truncate_smart(chat["full_text"])
+    full_text = chat["full_text"]
+    is_code = _content_is_mostly_code(full_text)
+
+    if is_code:
+        # For code-heavy chats: redact code blocks first, then truncate.
+        # This prevents the model from echoing PHP/HTML into the JSON output.
+        log.info("Code-heavy content detected for '%s' — redacting code blocks", chat["title"][:50])
+        redacted = _redact_code_blocks(full_text)
+        text = truncate_smart(redacted, max_chars=3000)
+    else:
+        text = truncate_smart(full_text)
 
     # Include existing tags as context (not as constraints)
     tag_context = ""
@@ -63,9 +128,10 @@ def extract_single(chat: dict) -> dict:
         )
 
     prompt = (
-        f"Conversation title: {chat['title']}\n"
+        f"Conversation title: {chat['title'][:200]}\n"
         f"Date: {chat['date']}\n"
         f"Model used: {', '.join(chat.get('models', ['unknown']))}\n"
+        f"Messages: {chat.get('n_messages', '?')}\n"
         f"{tag_context}\n\n"
         f"CONVERSATION:\n\n{text}"
     )
@@ -75,6 +141,7 @@ def extract_single(chat: dict) -> dict:
         system=SYSTEM_PROMPT,
         options=LLM_OPTIONS_EXTRACT,
         required_fields=["summary", "topics", "entities", "user_intent"],
+        timeout=90,  # hard cap per chat — prevents indefinite hangs
     )
 
     return sanitize_extraction(raw, chat_id=chat.get("id", ""), title=chat["title"])
@@ -124,7 +191,8 @@ def run() -> None:
         # Ensure the title is clean even before LLM extraction
         chat["title"] = sanitize_title(chat.get("title", ""))
 
-        print(f"[{n_done+1:3d}/{total}] {pct:4.0f}%  {chat['title'][:55]:<55}", end=" ", flush=True)
+        display = _display_title(chat["title"])
+        print(f"[{n_done+1:3d}/{total}] {pct:4.0f}%  {display:<55}", end=" ", flush=True)
         log.info("Processing [%d/%d]: %s", n_done + 1, total, chat["title"])
 
         try:
