@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# Runner interattivo della pipeline
-# Uso: bash run_pipeline.sh
+# Interactive pipeline runner
+# Usage: bash run_pipeline.sh [--model <name>] [--force]
 
 set -e
 
@@ -9,7 +9,7 @@ OUTPUT_DIR="$(cd "$(dirname "$0")" && pwd)/output"
 
 cd "$PIPELINE_DIR"
 
-# Propaga --force e --model a tutte le fasi
+# Parse --force and --model flags, propagate to all LLM phases
 FORCE_FLAG=""
 MODEL_FLAG=""
 args=("$@")
@@ -18,11 +18,11 @@ while [ $i -lt ${#args[@]} ]; do
     arg="${args[$i]}"
     if [ "$arg" = "--force" ]; then
         FORCE_FLAG="--force"
-        echo "⚠️  Modalità --force: le fasi già completate verranno rieseguite"
+        echo "⚠️  --force mode: completed phases will be rerun"
     elif [ "$arg" = "--model" ]; then
         i=$((i+1))
         MODEL_FLAG="--model ${args[$i]}"
-        echo "🤖 Modello: ${args[$i]}"
+        echo "🤖 Model: ${args[$i]}"
     fi
     i=$((i+1))
 done
@@ -36,110 +36,110 @@ separator() {
 }
 
 confirm() {
-    read -r -p "  → Procedere? [y/N] " ans
+    read -r -p "  → Proceed? [y/N] " ans
     case "$ans" in
         [yY]*) return 0 ;;
-        *) echo "  Interrotto."; exit 0 ;;
+        *) echo "  Aborted."; exit 0 ;;
     esac
 }
 
-wait_approved() {
+wait_for_human() {
     echo ""
     echo "  ┌─────────────────────────────────────────────────┐"
-    echo "  │  ✋  AZIONE RICHIESTA                             │"
+    echo "  │  ✋  ACTION REQUIRED                              │"
     echo "  │                                                 │"
     echo "  │  $1"
     echo "  │                                                 │"
-    echo "  │  Premi INVIO quando sei pronto...               │"
+    echo "  │  Press ENTER when ready...                      │"
     echo "  └─────────────────────────────────────────────────┘"
     read -r
 }
 
-separator "PIPELINE CLASSIFICAZIONE CONVERSAZIONI"
-echo "  Questo script esegue le 6 fasi della pipeline."
-echo "  Ti chiederà conferma prima di ogni fase LLM pesante."
+separator "CONVERSATION CLASSIFICATION PIPELINE"
+echo "  This script runs all 6 phases of the pipeline."
+echo "  It will ask for confirmation before each heavy LLM phase."
 echo ""
 confirm
 
-# ── Fase 0 ───────────────────────────────────────────────────────────────────
-separator "FASE 0 — Split e normalizzazione"
-python3 fase0_split.py $FORCE_FLAG
+# ── Phase 0 ──────────────────────────────────────────────────────────────────
+separator "PHASE 0 — Split and normalize"
+python3 phase0_split.py $FORCE_FLAG
 
-# ── Fase 1 ───────────────────────────────────────────────────────────────────
-separator "FASE 1 — Estrazione libera (LLM)"
-echo "  Questa fase fa 1 chiamata LLM per ogni conversazione."
-echo "  Con 429 chat e qwen3:32b, aspettati 30-90 minuti."
-echo "  Il processo riprende automaticamente se interrotto."
+# ── Phase 1 ──────────────────────────────────────────────────────────────────
+separator "PHASE 1 — Free extraction (LLM)"
+echo "  This phase makes 1 LLM call per conversation."
+echo "  Expect 30–90 minutes depending on model and corpus size."
+echo "  The process resumes automatically if interrupted."
 echo ""
 confirm
-python3 fase1_extract.py $FORCE_FLAG $MODEL_FLAG
+python3 phase1_extract.py $FORCE_FLAG $MODEL_FLAG
 
-# ── Fase 2 ───────────────────────────────────────────────────────────────────
-separator "FASE 2 — Analisi del corpus"
-python3 fase2_analyze.py $FORCE_FLAG $MODEL_FLAG
+# ── Phase 2 ──────────────────────────────────────────────────────────────────
+separator "PHASE 2 — Corpus analysis"
+python3 phase2_analyze.py $FORCE_FLAG $MODEL_FLAG
 
-# ── Fase 3 ───────────────────────────────────────────────────────────────────
-separator "FASE 3 — Proposta tassonomia"
-python3 fase3_taxonomy.py $FORCE_FLAG $MODEL_FLAG
+# ── Phase 3 ──────────────────────────────────────────────────────────────────
+separator "PHASE 3 — Taxonomy proposal"
+python3 phase3_taxonomy.py $FORCE_FLAG $MODEL_FLAG
 
-wait_approved "Leggi output/RIVEDI_TASSONOMIA.md               │
-  │  Modifica output/fase3_taxonomy.json              │
-  │  Imposta \"approved\": true nel JSON"
+wait_for_human "Read output/REVIEW_TAXONOMY.md                  │
+  │  Edit output/phase3_taxonomy.json if needed       │
+  │  Set \"approved\": true in the JSON"
 
-# Verifica approvazione
+# Verify approval
 APPROVED=$(python3 -c "
 import json
-with open('../output/fase3_taxonomy.json') as f:
+with open('../output/phase3_taxonomy.json') as f:
     d = json.load(f)
 print('yes' if d.get('approved') else 'no')
 ")
 
 if [ "$APPROVED" != "yes" ]; then
     echo ""
-    echo "  ❌ La tassonomia non è stata approvata."
-    echo "     Imposta \"approved\": true in output/fase3_taxonomy.json"
+    echo "  ❌ Taxonomy not approved."
+    echo "     Set \"approved\": true in output/phase3_taxonomy.json"
     exit 1
 fi
 
-echo "  ✓ Tassonomia approvata, procedo..."
+echo "  ✓ Taxonomy approved, continuing..."
 
-# ── Fase 4 ───────────────────────────────────────────────────────────────────
-separator "FASE 4 — Classificazione vincolata (LLM)"
-echo "  Stessa durata della Fase 1 (~30-90 minuti)."
+# ── Phase 4 ──────────────────────────────────────────────────────────────────
+separator "PHASE 4 — Constrained classification (LLM)"
+echo "  Similar duration to Phase 1 (~30–90 minutes)."
 echo ""
 confirm
-python3 fase4_classify.py $FORCE_FLAG $MODEL_FLAG
+python3 phase4_classify.py $FORCE_FLAG $MODEL_FLAG
 
-# ── Fase 5 ───────────────────────────────────────────────────────────────────
-separator "FASE 5 — Quality Assurance"
-python3 fase5_qa.py $FORCE_FLAG
+# ── Phase 5 ──────────────────────────────────────────────────────────────────
+separator "PHASE 5 — Quality Assurance"
+python3 phase5_qa.py $FORCE_FLAG
 
-wait_approved "Leggi output/fase5_qa_report.md                 │
-  │  Controlla il campione in fase5_review_sample.json │
-  │  Se ok → procedi. Se no → torna a Fase 3"
+wait_for_human "Read output/phase5_qa_report.md                 │
+  │  Review sample: phase5_review_sample.json          │
+  │  If ok → proceed. If not → go back to Phase 3"
 
-# ── Fase 6 ───────────────────────────────────────────────────────────────────
-separator "FASE 6 — Output finale"
-echo "  Quale output vuoi generare?"
-echo "  1) Tutti"
-echo "  2) Solo Open WebUI (reimportazione)"
-echo "  3) Solo Obsidian vault"
-echo "  4) Solo CSV"
-echo "  5) Solo catalogo JSON"
+# ── Phase 6 ──────────────────────────────────────────────────────────────────
+separator "PHASE 6 — Final output"
+echo "  Which outputs do you want to generate?"
+echo "  1) All"
+echo "  2) Open WebUI import only"
+echo "  3) Obsidian vault only"
+echo "  4) CSV only"
+echo "  5) JSON catalog only"
 echo ""
-read -r -p "  Scelta [1]: " choice
+read -r -p "  Choice [1]: " choice
 
 case "${choice:-1}" in
-    1) python3 fase6_output.py all ;;
-    2) python3 fase6_output.py openwebui ;;
-    3) python3 fase6_output.py obsidian ;;
-    4) python3 fase6_output.py csv ;;
-    5) python3 fase6_output.py json ;;
-    *) python3 fase6_output.py all ;;
+    1) python3 phase6_output.py all ;;
+    2) python3 phase6_output.py openwebui ;;
+    3) python3 phase6_output.py obsidian ;;
+    4) python3 phase6_output.py csv ;;
+    5) python3 phase6_output.py json ;;
+    *) python3 phase6_output.py all ;;
 esac
 
-separator "✅ PIPELINE COMPLETATA"
-echo "  Risultati in: output/"
+separator "✅ PIPELINE COMPLETE"
+echo "  Results are in: output/"
 echo ""
 ls -lh "$OUTPUT_DIR"/OUTPUT_* 2>/dev/null || true
 echo ""

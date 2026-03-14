@@ -1,111 +1,120 @@
 """
-FASE 6 — Output finale
-═══════════════════════════════════════════════════════════════════════════════
-Input:  ../output/fase5_validated.json
-        ../output/fase0_chats.json
-        ../chat-export-*.json  (originale per reimportazione OWU)
-        ../output/fase3_taxonomy.json
+Phase 6 — Final output
+===============================================================================
+Input:  output/phase5_validated.json
+        output/phase0_chats.json
+        ../chat-export-*.json  (original, for Open WebUI reimport)
+        output/phase3_taxonomy.json
 
-Output (scegli quale generare):
-  A) OUTPUT_openwebui_import.json   → reimporta in Open WebUI con tag
-  B) OUTPUT_obsidian_vault/         → vault Obsidian con frontmatter YAML
-  C) OUTPUT_catalog.csv             → spreadsheet
-  D) OUTPUT_catalog.json            → indice JSON leggero (senza full_text)
+Output (choose which to generate):
+  A) OUTPUT_openwebui_import.json  → reimport into Open WebUI with tags
+  B) OUTPUT_obsidian_vault/        → Obsidian vault with YAML frontmatter
+  C) OUTPUT_catalog.csv            → spreadsheet
+  D) OUTPUT_catalog.json           → lightweight JSON index (no full text)
+  E) OUTPUT_folder_checklist.md    → step-by-step checklist for OWU folders
 
-Uso:
-  python fase6_output.py           → genera tutti gli output
-  python fase6_output.py openwebui → solo A
-  python fase6_output.py obsidian  → solo B
-  python fase6_output.py csv       → solo C
-  python fase6_output.py json      → solo D
-═══════════════════════════════════════════════════════════════════════════════
+Usage:
+  python phase6_output.py           → generate all outputs
+  python phase6_output.py openwebui → only A
+  python phase6_output.py obsidian  → only B
+  python phase6_output.py csv       → only C
+  python phase6_output.py json      → only D
+===============================================================================
 """
 
 import sys
 from pathlib import Path
+
 sys.path.insert(0, str(Path(__file__).parent))
 
 import csv
 import json
 from datetime import datetime
 from collections import defaultdict
+
 from config import EXPORT_FILE, OUTPUT_DIR
+from logger import get_logger
 from utils import load_json, save_json, print_header, is_force
 
+log = get_logger("phase6")
+
+
+# ── Output generators ─────────────────────────────────────────────────────────
 
 def output_openwebui(classified: list, original_export: list, taxonomy: dict) -> Path:
     """
-    Genera un JSON reimportabile in Open WebUI.
-    Inietta i tag classificati in meta.tags + aggiunge tag categoria/sottocategoria.
+    Generate a JSON file ready for reimport into Open WebUI.
+    Injects classified tags into meta.tags, adding category and subcategory prefixes.
+    Original conversation structure (all branches, history graph) is preserved unchanged.
     """
     class_lookup = {c["id"]: c for c in classified}
+    updated = 0
 
     for chat in original_export:
         chat_id = chat.get("id", "")
         if chat_id not in class_lookup:
+            log.debug("Chat id=%s not in classification results, skipping", chat_id[:8])
             continue
 
         meta = class_lookup[chat_id]
-
-        # Tag classificati
         new_tags = list(meta.get("tags", []))
 
-        # Aggiungi categoria e sottocategoria come tag con prefisso
         macro = meta.get("macro_category")
-        sub   = meta.get("subcategory")
+        sub = meta.get("subcategory")
         if macro:
             new_tags.append(f"cat:{macro}")
         if sub:
             new_tags.append(f"sub:{sub}")
 
-        # Inietta in meta.tags (formato stringa, come già usato da OWU)
         existing_meta = chat.get("meta", {})
         existing_meta["tags"] = new_tags
         chat["meta"] = existing_meta
+        updated += 1
+
+    log.info("Open WebUI output: %d/%d chats updated with tags", updated, len(original_export))
 
     out_path = Path(OUTPUT_DIR) / "OUTPUT_openwebui_import.json"
     with open(out_path, "w", encoding="utf-8") as f:
         json.dump(original_export, f, indent=2, ensure_ascii=False)
-
     return out_path
 
 
 def output_obsidian(classified: list, chats_lookup: dict, taxonomy: dict) -> Path:
-    """Genera un vault Obsidian con un file .md per ogni conversazione."""
+    """
+    Generate an Obsidian vault with one .md file per conversation.
+    Files are organized by category/subcategory.
+    """
     vault = Path(OUTPUT_DIR) / "OUTPUT_obsidian_vault"
     vault.mkdir(parents=True, exist_ok=True)
 
-    # Ottieni i metadati delle categorie per il frontmatter
     cat_meta = {
         c["id"]: c.get("name", c["id"])
         for c in taxonomy.get("macro_categories", [])
     }
 
-    # Genera un index per categoria
-    by_category = defaultdict(list)
+    by_category: dict = defaultdict(list)
 
     for item in classified:
         if item.get("macro_category", "").startswith("_"):
-            continue  # salta errori
+            log.debug("Skipping error item in Obsidian output: %s", item.get("title"))
+            continue
 
-        cat_id  = item.get("macro_category", "altro")
-        sub_id  = item.get("subcategory") or "_generale"
+        cat_id = item.get("macro_category", "other")
+        sub_id = item.get("subcategory") or "_general"
         cat_name = cat_meta.get(cat_id, cat_id)
 
         dest_dir = vault / cat_id / sub_id
         dest_dir.mkdir(parents=True, exist_ok=True)
 
-        # Recupera il testo della conversazione
         chat_data = chats_lookup.get(item["id"], {})
-        full_text = chat_data.get("full_text", "[testo non disponibile]")
+        full_text = chat_data.get("full_text", "[text not available]")
 
-        # Frontmatter YAML
         tags_yaml = "\n".join(f"  - {t}" for t in item.get("tags", []))
         if not tags_yaml:
             tags_yaml = "  []"
 
         date = item.get("date", "unknown")
-        title = item.get("title", "Senza titolo").replace('"', '\\"')
+        title = item.get("title", "No title").replace('"', '\\"')
         models = ", ".join(chat_data.get("models", ["?"]))
 
         content = (
@@ -124,7 +133,6 @@ def output_obsidian(classified: list, chats_lookup: dict, taxonomy: dict) -> Pat
             f"{full_text}\n"
         )
 
-        # Nome file sicuro
         safe_title = "".join(
             c if c.isalnum() or c in " -_." else "_"
             for c in item.get("title", "untitled")
@@ -134,31 +142,39 @@ def output_obsidian(classified: list, chats_lookup: dict, taxonomy: dict) -> Pat
         (dest_dir / filename).write_text(content, encoding="utf-8")
         by_category[cat_id].append((date, safe_title, sub_id, item.get("tags", [])))
 
-    # Genera indice globale
-    index_lines = ["# Indice conversazioni", "", f"*Generato il {datetime.now().strftime('%Y-%m-%d')}*", ""]
+    # Global index
+    index_lines = [
+        "# Conversation Index",
+        "",
+        f"*Generated: {datetime.now().strftime('%Y-%m-%d')}*",
+        "",
+    ]
     for cat_id, items in sorted(by_category.items()):
         cat_name = cat_meta.get(cat_id, cat_id)
         index_lines.append(f"\n## {cat_name} ({len(items)})")
         for date, title, sub, tags in sorted(items):
             tag_str = " ".join(f"`{t}`" for t in tags[:3])
-            index_lines.append(f"- [[{cat_id}/{sub}/{date}_{title}|{title}]] {tag_str}")
+            index_lines.append(
+                f"- [[{cat_id}/{sub}/{date}_{title}|{title}]] {tag_str}"
+            )
 
     (vault / "INDEX.md").write_text("\n".join(index_lines), encoding="utf-8")
+    log.info("Obsidian vault: %d categories, %d files", len(by_category), sum(len(v) for v in by_category.values()))
 
     return vault
 
 
 def output_csv(classified: list) -> Path:
-    """Genera un CSV tabellare con tutte le classificazioni."""
+    """Generate a flat CSV catalog of all classifications."""
     out_path = Path(OUTPUT_DIR) / "OUTPUT_catalog.csv"
 
     with open(out_path, "w", newline="", encoding="utf-8") as f:
         writer = csv.writer(f)
         writer.writerow([
-            "ID", "Titolo", "Data",
-            "Categoria", "Sotto-categoria",
-            "Tags", "Tipo Interazione",
-            "Confidenza", "Note Ambiguità",
+            "ID", "Title", "Date",
+            "Category", "Subcategory",
+            "Tags", "Interaction Type",
+            "Confidence", "Ambiguity Note",
         ])
         for c in classified:
             writer.writerow([
@@ -173,11 +189,12 @@ def output_csv(classified: list) -> Path:
                 c.get("ambiguity_note", "") or "",
             ])
 
+    log.info("CSV catalog: %d rows → %s", len(classified), out_path)
     return out_path
 
 
 def output_json_catalog(classified: list, chats_lookup: dict) -> Path:
-    """Genera un indice JSON leggero (senza full_text, solo metadati)."""
+    """Generate a lightweight JSON index (metadata only, no full text)."""
     catalog = []
     for c in classified:
         chat_data = chats_lookup.get(c["id"], {})
@@ -197,19 +214,14 @@ def output_json_catalog(classified: list, chats_lookup: dict) -> Path:
 
     out_path = Path(OUTPUT_DIR) / "OUTPUT_catalog.json"
     save_json(catalog, out_path)
+    log.info("JSON catalog: %d entries → %s", len(catalog), out_path)
     return out_path
 
 
 def output_folder_checklist(classified: list, chats_lookup: dict, taxonomy: dict) -> Path:
     """
-    Genera una checklist markdown per organizzare manualmente le chat in cartelle
-    su Open WebUI dopo l'importazione.
-
-    Struttura:
-    - Una sezione per ogni macro_categoria (= cartella suggerita)
-    - Dentro ogni sezione, sotto-sezioni per subcategory (= sotto-cartella)
-    - Ogni chat elencata con titolo, data, confidenza e checkbox
-    - Nota sulle chat che avevano già una cartella (folder_id presente)
+    Generate a markdown checklist for manually organizing chats into
+    Open WebUI folders after import.
     """
     cat_meta = {
         c["id"]: c.get("name", c["id"])
@@ -220,32 +232,26 @@ def output_folder_checklist(classified: list, chats_lookup: dict, taxonomy: dict
         for s in c.get("subcategories", []):
             sub_meta[s["id"]] = s.get("name", s["id"])
 
-    # Raggruppa per categoria → sottocategoria
-    by_cat = defaultdict(lambda: defaultdict(list))
-    errors = []
+    by_cat: dict = defaultdict(lambda: defaultdict(list))
+    errors: list = []
 
     for item in classified:
         macro = item.get("macro_category", "")
         if macro.startswith("_"):
             errors.append(item)
             continue
-        sub = item.get("subcategory") or "_generale"
+        sub = item.get("subcategory") or "_general"
         chat_data = chats_lookup.get(item["id"], {})
         by_cat[macro][sub].append({
-            "title":      item.get("title", "Senza titolo"),
+            "title":      item.get("title", "No title"),
             "date":       item.get("date", "?"),
             "confidence": item.get("confidence", "?"),
             "tags":       item.get("tags", []),
-            "had_folder": bool(chat_data.get("folder_id")),  # aveva già una cartella?
+            "had_folder": bool(chat_data.get("folder_id")),
             "id":         item.get("id", "")[:8],
         })
 
-    # Statistiche rapide
-    total_ok = sum(
-        len(chats)
-        for subs in by_cat.values()
-        for chats in subs.values()
-    )
+    total_ok = sum(len(chats) for subs in by_cat.values() for chats in subs.values())
     total_had_folder = sum(
         1
         for subs in by_cat.values()
@@ -255,18 +261,18 @@ def output_folder_checklist(classified: list, chats_lookup: dict, taxonomy: dict
     )
 
     lines = [
-        "# Checklist cartelle Open WebUI",
+        "# Open WebUI Folder Checklist",
         "",
-        "> **Come usarla:**",
-        "> 1. Importa `OUTPUT_openwebui_import.json` in Open WebUI",
-        "> 2. Crea le cartelle elencate qui sotto (una per macro-categoria)",
-        "> 3. Per ogni sezione, seleziona le chat e spostale nella cartella",
-        "> 4. Spunta la checkbox quando hai spostato ogni chat",
-        "> 5. Le sotto-categorie puoi ignorarle o creare sotto-cartelle a tua scelta",
+        "> **How to use:**",
+        "> 1. Import `OUTPUT_openwebui_import.json` into Open WebUI",
+        "> 2. Create the folders listed below (one per macro-category)",
+        "> 3. For each section, select the chats and move them to the folder",
+        "> 4. Check the checkbox once you have moved each chat",
+        "> 5. Subcategories: ignore or create sub-folders as you prefer",
         "",
-        f"> **Totale chat:** {total_ok}  |  "
-        f"**Già in cartella (UUID preservato):** {total_had_folder}  |  "
-        f"**Errori classificazione:** {len(errors)}",
+        f"> **Total chats:** {total_ok}  |  "
+        f"**Already had a folder (UUID preserved):** {total_had_folder}  |  "
+        f"**Classification errors:** {len(errors)}",
         "",
         "---",
         "",
@@ -276,81 +282,76 @@ def output_folder_checklist(classified: list, chats_lookup: dict, taxonomy: dict
         cat_name = cat_meta.get(macro_id, macro_id)
         total_in_cat = sum(len(v) for v in subs.values())
 
-        lines.append(f"## 📁 {cat_name} ({total_in_cat} chat)")
-        lines.append(f"*Crea la cartella: **\"{cat_name}\"***")
+        lines.append(f"## 📁 {cat_name} ({total_in_cat} chats)")
+        lines.append(f"*Create folder: **\"{cat_name}\"***")
         lines.append("")
 
         for sub_id, chats in sorted(subs.items()):
-            if sub_id == "_generale":
-                sub_label = "Generale"
-            else:
-                sub_label = sub_meta.get(sub_id, sub_id)
-
+            sub_label = "General" if sub_id == "_general" else sub_meta.get(sub_id, sub_id)
             lines.append(f"### {sub_label} ({len(chats)})")
 
-            # Ordina per data
             for chat in sorted(chats, key=lambda x: x["date"]):
-                conf_icon = {"alta": "✅", "media": "🟡", "bassa": "🔴"}.get(
+                conf_icon = {"high": "✅", "medium": "🟡", "low": "🔴",
+                             "alta": "✅", "media": "🟡", "bassa": "🔴"}.get(
                     chat["confidence"], "⬜"
                 )
-                folder_note = " *(aveva cartella)*" if chat["had_folder"] else ""
+                folder_note = " *(had folder)*" if chat["had_folder"] else ""
                 tags_str = " ".join(f"`{t}`" for t in chat["tags"][:3])
                 lines.append(
                     f"- [ ] **{chat['title']}**{folder_note}  "
                     f"{conf_icon} {chat['date']}  {tags_str}"
                 )
-
             lines.append("")
 
-    # Sezione errori (se esistono)
     if errors:
         lines += [
             "---",
             "",
-            f"## ⚠️ Chat non classificate ({len(errors)})",
+            f"## ⚠️ Unclassified chats ({len(errors)})",
             "",
-            "Queste chat hanno avuto errori durante la classificazione.",
-            "Dovrai assegnarle manualmente.",
+            "These chats had errors during classification and must be assigned manually.",
             "",
         ]
         for e in errors:
-            chat_data = chats_lookup.get(e["id"], {})
-            lines.append(f"- [ ] **{e.get('title', '?')}** — {e.get('_error', 'errore sconosciuto')}")
+            lines.append(f"- [ ] **{e.get('title', '?')}** — {e.get('_error', 'unknown error')}")
 
     lines += [
         "",
         "---",
         "",
-        "## 📊 Riepilogo",
+        "## Summary",
         "",
-        "| Cartella | Chat | Sotto-categorie |",
-        "|----------|------|-----------------|",
+        "| Folder | Chats | Subcategories |",
+        "|--------|-------|---------------|",
     ]
     for macro_id, subs in sorted(by_cat.items()):
         cat_name = cat_meta.get(macro_id, macro_id)
         total_in_cat = sum(len(v) for v in subs.values())
-        n_subs = len([s for s in subs if s != "_generale"])
+        n_subs = len([s for s in subs if s != "_general"])
         lines.append(f"| {cat_name} | {total_in_cat} | {n_subs} |")
 
     out_path = Path(OUTPUT_DIR) / "OUTPUT_folder_checklist.md"
     out_path.write_text("\n".join(lines), encoding="utf-8")
+    log.info("Folder checklist: %d categories → %s", len(by_cat), out_path)
     return out_path
 
 
-def run():
-    modes_arg = sys.argv[1:] if len(sys.argv) > 1 else ["all"]
-    mode = modes_arg[0].lower()
+# ── Entry point ───────────────────────────────────────────────────────────────
 
-    print_header("FASE 6 — Output finale")
+def run() -> None:
+    args = [a for a in sys.argv[1:] if not a.startswith("--")]
+    mode = args[0].lower() if args else "all"
 
-    # Carica tutti i dati necessari
-    validated = load_json(Path(OUTPUT_DIR) / "fase5_validated.json")
+    print_header("PHASE 6 — Final output")
+    log.info("Phase 6 started — mode=%s", mode)
+
+    validated = load_json(Path(OUTPUT_DIR) / "phase5_validated.json")
     classified = validated["classified"]
 
-    fase0 = load_json(Path(OUTPUT_DIR) / "fase0_chats.json")
-    chats_lookup = {c["id"]: c for c in fase0["chats"]}
+    phase0 = load_json(Path(OUTPUT_DIR) / "phase0_chats.json")
+    chats_lookup = {c["id"]: c for c in phase0["chats"]}
 
-    tax_obj = load_json(Path(OUTPUT_DIR) / "fase3_taxonomy.json")
+    tax_obj = load_json(Path(OUTPUT_DIR) / "phase3_taxonomy.json")
     taxonomy = tax_obj["taxonomy"]
 
     export_path = Path(EXPORT_FILE)
@@ -361,43 +362,45 @@ def run():
         c for c in classified
         if not c.get("macro_category", "").startswith("_")
     ]
-    print(f"Conversazioni da esportare: {len(ok_classified)}/{len(classified)}")
+    print(f"Conversations to export: {len(ok_classified)}/{len(classified)}")
 
-    # ── Output A: Open WebUI ─────────────────────────────────────────────────
+    # ── A: Open WebUI ─────────────────────────────────────────────────────────
     if mode in ("all", "openwebui"):
-        print("\n[A] Generazione Open WebUI import...", end=" ", flush=True)
+        print("\n[A] Generating Open WebUI import...", end=" ", flush=True)
         if export_path.exists():
             original = load_json(export_path)
             path = output_openwebui(classified, original, taxonomy)
             print(f"✓  {path}")
         else:
-            print(f"✗  File originale non trovato: {export_path}")
+            log.error("Original export not found: %s", export_path)
+            print(f"✗  Original export not found: {export_path}")
 
-    # ── Output B: Obsidian ───────────────────────────────────────────────────
+    # ── B: Obsidian ───────────────────────────────────────────────────────────
     if mode in ("all", "obsidian"):
-        print("\n[B] Generazione vault Obsidian...", end=" ", flush=True)
+        print("\n[B] Generating Obsidian vault...", end=" ", flush=True)
         path = output_obsidian(ok_classified, chats_lookup, taxonomy)
         n_files = sum(1 for _ in path.rglob("*.md"))
-        print(f"✓  {path}  ({n_files} file)")
+        print(f"✓  {path}  ({n_files} files)")
 
-    # ── Output C: CSV ────────────────────────────────────────────────────────
+    # ── C: CSV ────────────────────────────────────────────────────────────────
     if mode in ("all", "csv"):
-        print("\n[C] Generazione CSV...", end=" ", flush=True)
+        print("\n[C] Generating CSV...", end=" ", flush=True)
         path = output_csv(classified)
         print(f"✓  {path}")
 
-    # ── Output D: JSON catalog ───────────────────────────────────────────────
+    # ── D: JSON catalog ───────────────────────────────────────────────────────
     if mode in ("all", "json"):
-        print("\n[D] Generazione catalogo JSON...", end=" ", flush=True)
+        print("\n[D] Generating JSON catalog...", end=" ", flush=True)
         path = output_json_catalog(ok_classified, chats_lookup)
         print(f"✓  {path}")
 
-    # ── Checklist cartelle (sempre generata) ────────────────────────────────
-    print("\n[E] Generazione checklist cartelle...", end=" ", flush=True)
+    # ── E: Folder checklist (always generated) ────────────────────────────────
+    print("\n[E] Generating folder checklist...", end=" ", flush=True)
     path = output_folder_checklist(ok_classified, chats_lookup, taxonomy)
     print(f"✓  {path}")
 
-    print(f"\n✓ Fase 6 completata. Tutti i file sono in {OUTPUT_DIR}/")
+    log.info("Phase 6 complete — mode=%s", mode)
+    print(f"\n✓ Phase 6 complete. All files are in {OUTPUT_DIR}/")
 
 
 if __name__ == "__main__":
